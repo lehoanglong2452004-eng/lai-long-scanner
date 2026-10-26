@@ -1,0 +1,11 @@
+{
+  "name": "lai-long-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Free multi-asset market scanner: forex, crypto, commodities, indices and US tech stocks, with grouped indicator votes.",
+  "scripts": {
+    "test": "node tests/indicators.test.mjs",
+    "dev": "node tools/serve.mjs"
+  }
+}

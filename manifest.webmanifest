@@ -1,0 +1,13 @@
+{
+  "name": "Lai Long Scanner",
+  "short_name": "Lai Long",
+  "description": "Free multi-asset market scanner with grouped indicator votes and clear real-time or delayed labels.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
