@@ -2,7 +2,7 @@
 // The CFTC API does not allow browser requests, so the site reads this pre-built file instead.
 // Run: node tools/update-cot.mjs   (a GitHub Action runs it every Saturday)
 import { inflateRawSync } from 'node:zlib';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { SYMBOLS } from '../js/symbols.js';
 
 const WEEKS = 170;
@@ -71,11 +71,17 @@ for (const r of rows.sort((a, b) => a.date.localeCompare(b.date))) {
 for (const m of Object.values(markets)) m.rows = m.rows.slice(-WEEKS);
 
 const missing = [...codes].filter(([code]) => !markets[code]).map(([code, id]) => `${id} (${code})`);
-await mkdir(new URL('../data/', import.meta.url), { recursive: true });
-await writeFile(new URL('../data/cot.json', import.meta.url), JSON.stringify({
-  generatedAt: new Date().toISOString(),
-  source: 'CFTC Commitments of Traders, legacy futures-only report',
-  markets,
-}));
+// Rewrite only when the positions changed, so the weekly job does not commit for nothing.
+const file = new URL('../data/cot.json', import.meta.url);
+const previous = await readFile(file, 'utf8').then(JSON.parse).catch(() => null);
+if (JSON.stringify(previous?.markets) === JSON.stringify(markets)) console.log('COT data unchanged');
+else {
+  await mkdir(new URL('../data/', import.meta.url), { recursive: true });
+  await writeFile(file, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    source: 'CFTC Commitments of Traders, legacy futures-only report',
+    markets,
+  }));
+}
 for (const [code, m] of Object.entries(markets)) console.log(`${m.symbol.padEnd(8)} ${code}  ${m.rows.length} weeks  last ${m.rows.at(-1).date}  ${m.market}`);
 if (missing.length) { console.error(`Missing markets: ${missing.join(', ')}`); process.exitCode = 1; }
