@@ -6,6 +6,9 @@ symbol with where its price comes from and how fresh it is.
 
 **Live site:** https://lehoanglong2452004-eng.github.io/lai-long-scanner/
 
+Bilingual: English and Tiếng Việt (switch with the EN / VI button; the first visit follows the browser language).
+Every label, state, badge and the meaning, formula and signal rule of all 31 indicators are translated.
+
 > For information only. Not financial advice. Signals are mechanical and have not been back-tested for profitability.
 
 ## What it shows
@@ -86,6 +89,7 @@ js/indicators.js      technical analysis library
 js/signals.js         indicator catalog, notes, votes and Total
 js/hours.js           trading hours of the underlying markets
 js/theme.js           colour presets and fonts
+js/i18n.js            English and Vietnamese text
 tools/                dev server, smoke test, COT builder
 tests/                indicator tests
 ```

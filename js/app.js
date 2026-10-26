@@ -3,11 +3,12 @@
 import { SYMBOLS, SYMBOL_BY_ID, ASSET_GROUPS } from './symbols.js';
 import { ADAPTERS, TF, TIMEFRAMES, sourceKey, sourceLabel, optionsSummary, OPTIONS_CURRENCY, cotHistory, tdUsedToday } from './sources.js';
 import { evaluate, INDICATORS, GROUPS } from './signals.js';
-import { isMarketOpen, HOURS_LABEL } from './hours.js';
+import { isMarketOpen } from './hours.js';
 import { loadSettings, saveSettings } from './store.js';
 import { PRESETS, FONTS, COLOR_KEYS, applyTheme } from './theme.js';
+import { t, tr, lang, setLang, locale, LANGS, monthName, groupName, groupShort, symbolName, indText, dataRows } from './i18n.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const REPO_URL = 'https://github.com/lehoanglong2452004-eng/lai-long-scanner';
 
 const PRICE_POLL_MS = 10_000;
@@ -22,6 +23,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const isNum = Number.isFinite;
 
 const settings = loadSettings();
+if (!settings.lang) settings.lang = /^vi\b/i.test(navigator.language || '') ? 'vi' : 'en';
+setLang(settings.lang);
 const save = () => saveSettings(settings);
 
 const state = {
@@ -149,8 +152,8 @@ async function pollTrades(ids = SYMBOLS.map(s => s.id)) {
     const sym = SYMBOL_BY_ID[id], d = sourceFor(sym), ad = ADAPTERS[d.source];
     if (!ad.trades) return;
     try {
-      const t = await ad.trades(d);
-      state.trades.set(id, { ...t, at: Date.now(), key: sourceKey(d) });
+      const tape = await ad.trades(d);
+      state.trades.set(id, { ...tape, at: Date.now(), key: sourceKey(d) });
     } catch { /* keep the previous tape */ }
   })));
   scheduleRender();
@@ -175,15 +178,8 @@ async function loadCot() {
   scheduleRender();
 }
 
-function historySource(sym) {
-  const h = sym.history;
-  if (!h) return null;
-  // Use the main source when it already has long history (crypto spot, ECB).
-  return h;
-}
-
 async function loadMonthly(sym) {
-  const h = historySource(sym), cur = state.monthly.get(sym.id);
+  const h = sym.history, cur = state.monthly.get(sym.id);
   if (!h) { state.monthly.set(sym.id, { na: 'Low history', at: Date.now() }); return; }
   if (cur && cur.key === sourceKey(h) && Date.now() - cur.at < (cur.na === 'Error' ? 10 * 60_000 : 24 * 3_600_000)) return;
   if (ADAPTERS[h.source].needsKey && !settings.tdKey) { state.monthly.set(sym.id, { na: 'Needs key', at: Date.now(), key: sourceKey(h) }); return; }
@@ -207,7 +203,7 @@ function loadDetail(sym) {
 // ---------- evaluation ----------
 function contextFor(sym, tf, s) {
   const d = sourceFor(sym), key = sourceKey(d);
-  const pr = state.prices.get(sym.id), t = state.trades.get(sym.id);
+  const pr = state.prices.get(sym.id), tape = state.trades.get(sym.id);
   const daily = state.series.get(`${sym.id}|D1`);
   const cur = OPTIONS_CURRENCY[sym.id], opt = cur ? state.options.get(cur) : null;
   const m = state.monthly.get(sym.id);
@@ -220,7 +216,7 @@ function contextFor(sym, tf, s) {
   return {
     tf, tfSec: TF[tf].sec, useClosedBar: settings.useClosedBar,
     price: pr && pr.key === key ? pr.price : undefined,
-    trades: t && t.key === key ? t : null, tradesSupported: !!ADAPTERS[d.source].trades,
+    trades: tape && tape.key === key ? tape : null, tradesSupported: !!ADAPTERS[d.source].trades,
     daily: daily?.candles && daily.key === s.key ? daily.candles : null,
     options: opt?.list ? opt : null, optionsSupported: !!cur,
     cot, cotNa,
@@ -232,7 +228,7 @@ function evalFor(sym, tf) {
   const s = state.series.get(`${sym.id}|${tf}`);
   if (!s || s.key !== sourceKey(sourceFor(sym))) return null;
   const ctx = contextFor(sym, tf, s);
-  const sig = [s.fetchedAt, ctx.price, ctx.trades?.at, ctx.daily?.length, ctx.options?.at, state.cot.at, state.monthly.get(sym.id)?.at, settings.useClosedBar].join('|');
+  const sig = [lang(), s.fetchedAt, ctx.price, ctx.trades?.at, ctx.daily?.length, ctx.options?.at, state.cot.at, state.monthly.get(sym.id)?.at, settings.useClosedBar].join('|');
   const k = `${sym.id}|${tf}`, memo = state.evals.get(k);
   if (memo && memo.sig === sig) return memo.r;
   const r = evaluate(s, ctx);
@@ -243,16 +239,16 @@ function evalFor(sym, tf) {
 function priceFor(sym, tf) {
   const d = sourceFor(sym), pr = state.prices.get(sym.id);
   if (pr && pr.key === sourceKey(d)) return pr.price;
-  for (const t of [tf, 'D1', 'H1']) {
-    const s = state.series.get(`${sym.id}|${t}`);
+  for (const x of [tf, 'D1', 'H1']) {
+    const s = state.series.get(`${sym.id}|${x}`);
     if (s?.candles?.length && s.key === sourceKey(d)) return s.candles[s.candles.length - 1].close;
   }
   return NaN;
 }
 
 function changeFor(sym, tf) {
-  for (const t of [tf, 'D1']) {
-    const r = evalFor(sym, t);
+  for (const x of [tf, 'D1']) {
+    const r = evalFor(sym, x);
     if (r && isNum(r.change)) return r.change;
   }
   return NaN;
@@ -262,46 +258,49 @@ function changeFor(sym, tf) {
 const fmtPrice = (p, dp) => isNum(p) ? p.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp }) : '—';
 const fmtChg = v => isNum(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : '';
 const fmtTime = ms => new Date(ms).toLocaleTimeString('en-GB', { hour12: false });
-const fmtDay = t => new Date(t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const fmtDay = sec => new Date(sec * 1000).toLocaleDateString(locale(), { month: 'short', day: 'numeric', timeZone: 'UTC' });
 function fmtAge(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 172800) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
+  const vi = lang() === 'vi';
+  if (s < 60) return `${s}${vi ? ' giây' : 's'}`;
+  if (s < 3600) return `${Math.round(s / 60)}${vi ? ' phút' : 'm'}`;
+  if (s < 172800) return `${Math.round(s / 3600)}${vi ? ' giờ' : 'h'}`;
+  return `${Math.round(s / 86400)}${vi ? ' ngày' : 'd'}`;
 }
 const ARROW = { 1: '↑', '-1': '↓', 0: '→' };
+const naText = code => tr('na', code);
+const naCell = code => `<span class="v ${code === 'Low history' ? 'W' : 'X'}" title="${esc(naText(code))}">${esc(code === 'Low history' ? t('na.Low') : '–')}</span>`;
 
 // ---------- badges: what kind of data, and how old it is ----------
 function badgeFor(sym, tf) {
   const d = sourceFor(sym), ad = ADAPTERS[d.source], s = state.series.get(`${sym.id}|${tf}`);
-  const open = isMarketOpen(sym.hours), now = Date.now();
-  if (ad.needsKey && !settings.tdKey) return { cls: 'nokey', text: 'Needs key', title: 'Add a free Twelve Data API key in Settings to load this symbol.' };
+  const open = isMarketOpen(sym.hours), now = Date.now(), hours = t(`hours.${sym.hours}`);
+  if (ad.needsKey && !settings.tdKey) return { cls: 'nokey', text: t('b.nokey'), title: t('bt.nokey') };
   if (d.kind === 'eod') {
     const daily = state.series.get(`${sym.id}|D1`)?.candles || s?.candles;
-    const t = daily?.[daily.length - 1]?.time;
-    return { cls: 'eod', text: t ? `EOD ${fmtDay(t)}` : 'EOD', title: 'ECB reference rate, published once per business day around 16:00 CET. Close only, no intraday data.' };
+    const last = daily?.[daily.length - 1]?.time;
+    return { cls: 'eod', text: last ? t('b.eod', { date: fmtDay(last) }) : t('b.eodNone'), title: t('bt.eod') };
   }
-  if (s?.na === 'Error' && !s.candles) return { cls: 'err', text: 'Error', title: s.error || 'Could not load data' };
+  if (s?.na === 'Error' && !s.candles) return { cls: 'err', text: t('b.error'), title: s.error || t('b.error') };
   if (ad.prices) {
     const p = state.prices.get(sym.id);
     const at = p && p.key === sourceKey(d) ? p.at : s?.candles ? s.fetchedAt : 0;
-    if (!at) return { cls: 'eod', text: 'Loading', title: 'Waiting for the first update' };
+    if (!at) return { cls: 'eod', text: t('b.loading'), title: t('bt.loading') };
     const age = now - at;
-    if (age >= FRESH_MS) return { cls: 'delay', text: `Delayed ${fmtAge(age)}`, title: `No update for ${fmtAge(age)}. ${state.errors.get(d.source) || ''}`.trim() };
-    if (d.kind === 'proxy' && !open) return { cls: 'off', text: 'Proxy · off-hours', title: `The underlying market is closed (${HOURS_LABEL[sym.hours]}). The perpetual keeps trading, so its price can drift before the next open.` };
-    if (d.kind === 'proxy') return { cls: 'proxy', text: 'Proxy · live', title: `Real-time perpetual contract on ${ad.label} that tracks ${sym.name}. It is not the price of the underlying market itself.` };
-    return { cls: 'live', text: 'Live', title: `Real-time price from ${ad.label}.` };
+    if (age >= FRESH_MS) return { cls: 'delay', text: t('b.delayed', { age: fmtAge(age) }), title: `${t('bt.stale', { age: fmtAge(age) })} ${state.errors.get(d.source) || ''}`.trim() };
+    if (d.kind === 'proxy' && !open) return { cls: 'off', text: t('b.off'), title: t('bt.off', { hours }) };
+    if (d.kind === 'proxy') return { cls: 'proxy', text: t('b.proxy'), title: t('bt.proxy', { src: ad.label, name: symbolName(sym) }) };
+    return { cls: 'live', text: t('b.live'), title: t('bt.live', { src: ad.label }) };
   }
-  if (!s?.candles) return { cls: 'eod', text: 'Loading', title: 'Waiting for the first update' };
-  const pre = d.kind === 'etf' ? 'ETF · ' : '';
-  if (!open) return { cls: 'eod', text: `${pre}market closed`, title: HOURS_LABEL[sym.hours] };
+  if (!s?.candles) return { cls: 'eod', text: t('b.loading'), title: t('bt.loading') };
+  const etf = d.kind === 'etf';
+  const title = t('bt.td', { min: settings.tdRefreshMin }) + (etf ? ` ${t('bt.etf', { etf: d.sym, name: symbolName(sym) })}` : '');
+  if (!open) return { cls: 'eod', text: t(etf ? 'b.etfClosed' : 'b.closed'), title: hours };
   const last = s.candles[s.candles.length - 1];
   const lag = Math.max(0, s.fetchedAt - (last.time + TF[tf].sec) * 1000);
   const age = now - s.fetchedAt + lag;
-  const title = `Twelve Data free plan: refreshed every ${settings.tdRefreshMin} min (8 requests per minute, 800 per day).${d.kind === 'etf' ? ` ${d.sym} is an ETF used as a stand-in for ${sym.name}.` : ''}`;
-  if (age < FRESH_MS) return { cls: d.kind === 'etf' ? 'proxy' : 'live', text: d.kind === 'etf' ? 'ETF · live' : 'Live', title };
-  return { cls: 'delay', text: `${pre}delayed ${fmtAge(age)}`, title };
+  if (age < FRESH_MS) return { cls: etf ? 'proxy' : 'live', text: t(etf ? 'b.etfLive' : 'b.live'), title };
+  return { cls: 'delay', text: t(etf ? 'b.etfDelayed' : 'b.delayed', { age: fmtAge(age) }), title };
 }
 
 // ---------- scanner table ----------
@@ -315,29 +314,32 @@ function scheduleRender() {
 
 function voteCell(v) {
   if (!v) return '<span class="v X">…</span>';
-  if (v.na) return `<span class="v ${v.na === 'Low history' ? 'W' : 'X'}" title="${esc(v.na)}">${v.na === 'Low history' ? 'Low' : '–'}</span>`;
+  if (v.na) return naCell(v.na);
   const cls = v.vote > 0 ? 'B' : v.vote < 0 ? 'S' : 'N';
-  return `<span class="v ${cls}" title="${v.count} indicator${v.count === 1 ? '' : 's'}, score ${v.score.toFixed(2)}">${ARROW[v.vote]}</span>`;
+  return `<span class="v ${cls}" title="${esc(t('grp.title', { n: v.count, score: v.score.toFixed(2) }))}">${ARROW[v.vote]}</span>`;
 }
 
-function stateTone(id, r) {
-  if (id === 'adx' || id === 'sg') return r.state === 'Strong' || r.text === 'Strong' ? 'A' : r.state === 'Flat' || r.text === 'Flat' ? 'W' : 'N';
-  if (id === 'sq' || id === 'vo') return /Squeeze/.test(r.state || r.text) ? 'W' : /Expanding/.test(r.state || r.text) ? 'A' : 'N';
+// Colour for a state, from its internal code.
+function stateTone(id, code, r = {}) {
+  if (id === 'adx' || id === 'sg') return code === 'Strong' ? 'A' : code === 'Flat' ? 'W' : 'N';
+  if (id === 'sq' || id === 'vo') return code === 'Squeeze' ? 'W' : code === 'Expanding' ? 'A' : 'N';
   if (id === 'cot') return r.extreme ? 'W' : 'N';
   if (id === 'seas') return r.tendency > 0 ? 'B' : r.tendency < 0 ? 'S' : 'N';
-  if (id === 'rvol') return /High/.test(r.text) ? 'A' : 'N';
-  if (id === 'spk') return /Spike/.test(r.text) ? 'A' : 'N';
+  if (id === 'rvol') return code === 'High' ? 'A' : 'N';
+  if (id === 'spk') return code === 'Spike' ? 'A' : 'N';
   return 'N';
 }
 
 function groupCell(g, v) {
   if (g.votes) return voteCell(v);
   if (!v) return '<span class="v X">…</span>';
-  if (v.na) return `<span class="v ${v.na === 'Low history' ? 'W' : 'X'}" title="${esc(v.na)}">${v.na === 'Low history' ? 'Low' : '–'}</span>`;
-  let tone = stateTone(g.id, v);
-  if (g.id === 'mc') tone = v.text.startsWith('COT') ? (v.tone ? 'W' : 'N') : v.tone > 0 ? 'B' : v.tone < 0 ? 'S' : 'N';
+  if (v.na) return naCell(v.na);
+  if (g.id === 'mc') {
+    const tone = v.text.startsWith('COT') ? (v.tone ? 'W' : 'N') : v.tone > 0 ? 'B' : v.tone < 0 ? 'S' : 'N';
+    return `<span class="v ${tone}"${v.title ? ` title="${esc(v.title)}"` : ''}>${esc(v.text)}</span>`;
+  }
   const arrow = g.id === 'sg' && isNum(v.vote) ? ` ${ARROW[v.vote]}` : '';
-  return `<span class="v ${tone}"${v.title ? ` title="${esc(v.title)}"` : ''}>${esc(v.text)}${arrow}</span>`;
+  return `<span class="v ${stateTone(g.id, v.text)}">${esc(tr('st', v.text))}${arrow}</span>`;
 }
 
 // COT and seasonal do not depend on the timeframe, so fall back to the daily evaluation
@@ -348,9 +350,17 @@ function macroGroup(sym, r) {
   return evalFor(sym, 'D1')?.groups.mc || g;
 }
 
+function totalCell(r) {
+  if (!r) return '<span class="v X">…</span>';
+  if (r.total.na) return `<span class="v ${r.total.na === 'Low history' ? 'W' : 'X'}" title="${esc(naText(r.total.na))}">${esc(naText(r.total.na))}</span>`;
+  const n = GROUPS.filter(g => g.votes && !r.groups[g.id].na).length;
+  return `<span class="v ${r.total.cls}" title="${esc(t('tot.title', { score: r.total.score.toFixed(2), n }))}">${esc(r.total.label)}</span>`;
+}
+
 function filteredSymbols() {
   const q = $('#search').value.trim().toLowerCase();
-  let list = SYMBOLS.filter(s => (settings.group === 'All' || s.group === settings.group) && (!q || s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)));
+  let list = SYMBOLS.filter(s => (settings.group === 'All' || s.group === settings.group)
+    && (!q || s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || symbolName(s).toLowerCase().includes(q)));
   if (settings.sort !== 'default') {
     const val = s => settings.sort === 'total' ? evalFor(s, settings.tf)?.total?.score : changeFor(s, settings.tf);
     list = [...list].sort((a, b) => (isNum(val(b)) ? val(b) : -Infinity) - (isNum(val(a)) ? val(a) : -Infinity));
@@ -361,35 +371,32 @@ function filteredSymbols() {
 function rowHtml(sym) {
   const tf = settings.tf, d = sourceFor(sym), b = badgeFor(sym, tf), r = evalFor(sym, tf);
   const chg = changeFor(sym, tf);
-  const total = !r ? '<span class="v X">…</span>'
-    : r.total.na ? `<span class="v ${r.total.na === 'Low history' ? 'W' : 'X'}" title="${esc(r.total.na)}">${esc(r.total.na)}</span>`
-      : `<span class="v ${r.total.cls}" title="Score ${r.total.score.toFixed(2)} from ${GROUPS.filter(g => g.votes && !r.groups[g.id].na).length} groups">${r.total.label}</span>`;
   return `<div class="row" role="row" tabindex="0" data-id="${sym.id}"${state.open === sym.id ? ' aria-current="true"' : ''}>
-    <div class="c sym"><span class="tk">${sym.id}</span><span class="badge b-${b.cls}" title="${esc(b.title)}">${esc(b.text)}</span><span class="nm">${esc(sym.name)}</span></div>
+    <div class="c sym"><span class="tk">${sym.id}</span><span class="badge b-${b.cls}" title="${esc(b.title)}">${esc(b.text)}</span><span class="nm">${esc(symbolName(sym))}</span></div>
     <div class="c src" title="${esc(sourceLabel(d))}">${esc(sourceLabel(d))}</div>
     <div class="c q"><span class="px">${fmtPrice(priceFor(sym, tf), sym.dp)}</span><span class="chg ${chg > 0 ? 'up' : chg < 0 ? 'down' : ''}">${fmtChg(chg)}</span></div>
     ${GROUPS.map(g => `<div class="c g" data-g="${g.id}">${groupCell(g, g.id === 'mc' ? macroGroup(sym, r) : r?.groups[g.id])}</div>`).join('')}
-    <div class="c tot">${total}</div>
+    <div class="c tot">${totalCell(r)}</div>
   </div>`;
 }
 
 function headHtml() {
   return `<div class="thead" role="row">
-    <div class="c symh">Symbol</div><div class="c srch">Source</div><div class="c qh">Price / chg</div>
-    ${GROUPS.map(g => `<div class="c g" data-g="${g.id}" title="${g.votes ? 'Votes in Total' : 'Filter or context, no vote'}"><span class="l">${g.name}</span><span class="s">${g.short}</span></div>`).join('')}
-    <div class="c tot">Total</div>
+    <div class="c symh">${t('col.symbol')}</div><div class="c srch">${t('col.source')}</div><div class="c qh">${t('col.price')}</div>
+    ${GROUPS.map(g => `<div class="c g" data-g="${g.id}" title="${esc(t(g.votes ? 'col.votes' : 'col.context'))}"><span class="l">${esc(groupName(g))}</span><span class="s">${esc(groupShort(g))}</span></div>`).join('')}
+    <div class="c tot">${t('col.total')}</div>
   </div>`;
 }
 
 function render() {
   const list = filteredSymbols();
   let html = headHtml();
-  if (!list.length) html += '<div class="empty">No symbols match.</div>';
+  if (!list.length) html += `<div class="empty">${t('empty')}</div>`;
   else if (settings.sort === 'default') {
     for (const g of ASSET_GROUPS) {
       const rows = list.filter(s => s.group === g);
       if (!rows.length) continue;
-      html += `<div class="sect">${g}<span>${rows.length}</span></div>` + rows.map(rowHtml).join('');
+      html += `<div class="sect">${esc(t(`grp.${g}`))}<span>${rows.length}</span></div>` + rows.map(rowHtml).join('');
     }
   } else html += list.map(rowHtml).join('');
   $('#table').innerHTML = html;
@@ -403,8 +410,8 @@ function renderStatus() {
   const errs = [...state.errors].map(([k, v]) => `${ADAPTERS[k].label}: ${v}`);
   const cot = state.cot.status === 'error' ? `COT: ${state.cot.error}` : null;
   const problems = [...errs, cot].filter(Boolean);
-  $('#status').innerHTML = `${state.lastUpdate ? `Updated ${fmtTime(state.lastUpdate)}` : 'Loading market data…'} · ${loaded}/${SYMBOLS.length} symbols on ${tf} · votes from ${settings.useClosedBar ? 'last closed bar' : 'forming bar'}`
-    + (problems.length ? ` · <span class="err" title="${esc(problems.join('\n'))}">${problems.length} source issue${problems.length > 1 ? 's' : ''}</span>` : '');
+  $('#status').innerHTML = `${state.lastUpdate ? t('status.updated', { time: fmtTime(state.lastUpdate) }) : t('status.loading')} · ${t('status.symbols', { n: loaded, total: SYMBOLS.length, tf })} · ${t(settings.useClosedBar ? 'status.closed' : 'status.forming')}`
+    + (problems.length ? ` · <span class="err" title="${esc(problems.join('\n'))}">${esc(t('status.issues', { n: problems.length }))}</span>` : '');
 }
 
 // ---------- detail panel ----------
@@ -413,13 +420,13 @@ const wide = () => matchMedia('(min-width: 900px)').matches;
 function indCell(def, r) {
   if (!r) return '<span class="v X">…</span>';
   const v = r.ind[def.id];
-  if (v.na) return `<span class="v ${v.na === 'Low history' ? 'W' : 'X'}" title="${esc(v.na)}">${esc(v.na)}</span>`;
+  if (v.na) return `<span class="v ${v.na === 'Low history' ? 'W' : 'X'}">${esc(naText(v.na))}</span>`;
   if (v.stateOnly) {
     const arrow = def.id === 'adx' && isNum(v.vote) ? ` ${ARROW[v.vote]}` : '';
-    return `<span class="v ${stateTone(def.id, v)}" title="${esc(v.text)}">${esc(v.text)}${arrow}</span>`;
+    return `<span class="v ${stateTone(def.id, v.state, v)}">${esc(v.text)}${arrow}</span>`;
   }
   const cls = v.vote > 0 ? 'B' : v.vote < 0 ? 'S' : 'N';
-  return `<span class="v ${cls}" title="${esc(v.text || '')}">${v.text ? esc(v.text) + ' ' : ''}${ARROW[v.vote]}</span>`;
+  return `<span class="v ${cls}">${v.text ? esc(v.text) + ' ' : ''}${ARROW[v.vote]}</span>`;
 }
 
 function noteHtml(def, results) {
@@ -429,9 +436,9 @@ function noteHtml(def, results) {
   if (def.id === 'seas' && r?.seasonal) extra = monthsHtml(r.seasonal);
   if (def.id === 'cot' && r?.cot) {
     const rec = state.cot.data?.get(SYMBOL_BY_ID[state.open].cot.code);
-    extra = `<p><b>Report:</b> ${esc(rec?.market || '')}, positions as of ${esc(r.cot.date)} (${r.cot.weeks} weeks of history).</p>`;
+    extra = `<p><b>${t('d.report')}</b> ${esc(rec?.market || '')}, ${esc(t('d.asOf', { date: r.cot.date, n: r.cot.weeks }))}</p>`;
   }
-  return `<div class="note"><p><b>What it measures.</b> ${esc(def.what)}</p><p><b>Formula.</b> ${esc(def.formula)}</p><p><b>Signal.</b> ${esc(def.rule)}</p>${extra}</div>`;
+  return `<div class="note"><p><b>${t('d.what')}</b> ${esc(indText(def, 'what'))}</p><p><b>${t('d.formula')}</b> ${esc(indText(def, 'formula'))}</p><p><b>${t('d.signal')}</b> ${esc(indText(def, 'rule'))}</p>${extra}</div>`;
 }
 
 function profileHtml(p) {
@@ -439,18 +446,19 @@ function profileHtml(p) {
   const near = p.strikes.filter(s => !isNum(price) || (s.strike > price * 0.7 && s.strike < price * 1.3));
   const top = [...near].sort((a, b) => (b.callVol + b.putVol) - (a.callVol + a.putVol)).slice(0, 14).sort((a, b) => b.strike - a.strike);
   const max = Math.max(...top.map(s => Math.max(s.callVol, s.putVol)), 1e-9);
-  const rows = top.map(s => `<div class="k${s.strike === p.poc ? ' poc' : ''}">${s.strike.toLocaleString('en-US')}</div>
-    <div class="bar call" style="width:${(100 * s.callVol / max).toFixed(1)}%" title="Calls ${s.callVol.toFixed(1)}"></div>
-    <div class="bar put" style="width:${(100 * s.putVol / max).toFixed(1)}%" title="Puts ${s.putVol.toFixed(1)}"></div>`).join('');
-  return `<p><b>Deribit, last 24h.</b> Calls ${p.callVol.toFixed(0)}, puts ${p.putVol.toFixed(0)} (in coins). POC ${p.poc?.toLocaleString('en-US')}, call wall ${p.callWall?.toLocaleString('en-US')}, put wall ${p.putWall?.toLocaleString('en-US')}.</p>
-    <div class="prof"><div class="k">Strike</div><div>Calls</div><div>Puts</div>${rows}</div>`;
+  const n = v => v?.toLocaleString('en-US');
+  const rows = top.map(s => `<div class="k${s.strike === p.poc ? ' poc' : ''}">${n(s.strike)}</div>
+    <div class="bar call" style="width:${(100 * s.callVol / max).toFixed(1)}%" title="${t('d.calls')} ${s.callVol.toFixed(1)}"></div>
+    <div class="bar put" style="width:${(100 * s.putVol / max).toFixed(1)}%" title="${t('d.puts')} ${s.putVol.toFixed(1)}"></div>`).join('');
+  return `<p><b>${t('d.deribit')}</b> ${t('d.calls')} ${p.callVol.toFixed(0)}, ${t('d.puts')} ${p.putVol.toFixed(0)} (${t('d.coins')}). ${t('d.poc')} ${n(p.poc)}, ${t('d.callWall')} ${n(p.callWall)}, ${t('d.putWall')} ${n(p.putWall)}.</p>
+    <div class="prof"><div class="k">${t('d.strike')}</div><div>${t('d.calls')}</div><div>${t('d.puts')}</div>${rows}</div>`;
 }
 
 function monthsHtml(s) {
-  const name = m => new Date(Date.UTC(2000, m, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
   return `<div class="months">${s.byMonth.map(x => {
     const cls = !isNum(x.avg) ? 'v X' : x.avg > 0 ? 'v B' : 'v S';
-    return `<div class="${cls}" title="${name(x.m)}: avg ${(x.avg * 100).toFixed(2)}%, up ${Math.round(x.win * 100)}% of ${x.n} years"${x.m === s.m ? ' style="outline:1px solid var(--text)"' : ''}>${name(x.m)}<br>${isNum(x.avg) ? (x.avg * 100).toFixed(1) : '—'}</div>`;
+    const tip = t('d.monthTip', { m: monthName(x.m), avg: (x.avg * 100).toFixed(2), win: Math.round(x.win * 100), n: x.n });
+    return `<div class="${cls}" title="${esc(tip)}"${x.m === s.m ? ' style="outline:1px solid var(--text)"' : ''}>${esc(monthName(x.m))}<br>${isNum(x.avg) ? (x.avg * 100).toFixed(1) : '—'}</div>`;
   }).join('')}</div>`;
 }
 
@@ -460,8 +468,8 @@ function historyText(sym) {
     const c = state.series.get(`${sym.id}|${tf}`)?.candles;
     if (c?.length) weeks = Math.max(weeks, (c[c.length - 1].time - c[0].time) / 604800);
   }
-  if (!weeks) return 'Loading…';
-  return weeks >= 104 ? `${(weeks / 52).toFixed(1)} years loaded` : `${Math.round(weeks)} weeks loaded`;
+  if (!weeks) return t('d.loading');
+  return weeks >= 104 ? t('d.years', { n: (weeks / 52).toFixed(1) }) : t('d.weeks', { n: Math.round(weeks) });
 }
 
 function renderDetail() {
@@ -471,31 +479,42 @@ function renderDetail() {
   const d = sourceFor(sym), b = badgeFor(sym, wide() ? settings.tf : state.detailTf);
   const tfs = wide() ? TIMEFRAMES : [state.detailTf];
   const results = tfs.map(tf => evalFor(sym, tf));
-  const opts = sym.sources.map(x => `<option value="${esc(sourceKey(x))}"${sourceKey(x) === sourceKey(d) ? ' selected' : ''}${usable(x) ? '' : ' disabled'}>${esc(sourceLabel(x))} (${x.kind})${usable(x) ? '' : ' · needs key'}</option>`).join('');
+  const span = tfs.length > 1 ? ` style="grid-column:span ${tfs.length}"` : '';
+  const opts = sym.sources.map(x => `<option value="${esc(sourceKey(x))}"${sourceKey(x) === sourceKey(d) ? ' selected' : ''}${usable(x) ? '' : ' disabled'}>${esc(sourceLabel(x))} (${esc(t(`kind.${x.kind}`))})${usable(x) ? '' : ` · ${esc(t('kind.needsKey'))}`}</option>`).join('');
   let mx = `<div class="mx" style="--n:${tfs.length}"><div></div>${tfs.map(tf => `<div class="h">${tf}</div>`).join('')}`;
-  mx += `<div class="gh" style="grid-column:auto">Total</div>${results.map(r => `<div class="cell">${!r ? '<span class="v X">…</span>' : r.total.na ? `<span class="v X">${esc(r.total.na)}</span>` : `<span class="v ${r.total.cls}"><b>${r.total.label}</b></span>`}</div>`).join('')}`;
+  mx += `<div class="gh">${t('col.total')}</div>${results.map(r => `<div class="cell">${totalCell(r)}</div>`).join('')}`;
   for (const g of GROUPS) {
-    mx += `<div class="gh" style="grid-column:auto">${g.name}</div>${results.map(r => `<div class="cell">${groupCell(g, r?.groups[g.id])}</div>`).join('')}`;
+    // Macro does not depend on the timeframe: one cell across all columns.
+    const headCells = g.id === 'mc'
+      ? `<div class="cell"${span}>${groupCell(g, results.map(r => r?.groups.mc).find(x => x && !x.na) || results[0]?.groups.mc)}</div>`
+      : results.map(r => `<div class="cell">${groupCell(g, r?.groups[g.id])}</div>`).join('');
+    mx += `<div class="gh">${esc(groupName(g))}</div>${headCells}`;
     for (const def of INDICATORS.filter(x => x.group === g.id)) {
       const open = state.info === def.id;
-      mx += `<button class="nm" type="button" data-info="${def.id}" aria-expanded="${open}">${esc(def.name)}</button>${results.map(r => `<div class="cell">${indCell(def, r)}</div>`).join('')}`;
+      let cells;
+      if (def.tfFree && tfs.length > 1) {
+        const r = results.find(x => x && !x.ind[def.id].na) || results[0];
+        cells = `<div class="cell wide"${span} title="${esc(t('d.allTf'))}">${indCell(def, r)}</div>`;
+      } else cells = results.map(r => `<div class="cell">${indCell(def, r)}</div>`).join('');
+      mx += `<button class="nm" type="button" data-info="${def.id}" aria-expanded="${open}">${esc(indText(def, 'name'))}</button>${cells}`;
       if (open) mx += noteHtml(def, results);
     }
   }
   mx += '</div>';
+  const chg = changeFor(sym, settings.tf);
   el.innerHTML = `
     <div class="panel-head">
-      <button class="back" type="button" data-close aria-label="Close">←</button>
+      <button class="back" type="button" data-close aria-label="${esc(t('d.close'))}">←</button>
       <div style="flex:1;min-width:0">
         <h2>${sym.id} <span class="badge b-${b.cls}" title="${esc(b.title)}">${esc(b.text)}</span></h2>
-        <div class="sub">${esc(sym.name)} · ${fmtPrice(priceFor(sym, settings.tf), sym.dp)} <span class="${changeFor(sym, settings.tf) >= 0 ? 'up' : 'down'}">${fmtChg(changeFor(sym, settings.tf))}</span></div>
+        <div class="sub">${esc(symbolName(sym))} · ${fmtPrice(priceFor(sym, settings.tf), sym.dp)} <span class="${chg >= 0 ? 'up' : 'down'}">${fmtChg(chg)}</span></div>
       </div>
     </div>
     <dl class="meta">
-      <dt>Source</dt><dd><select id="d-source" aria-label="Data source">${opts}</select></dd>
-      <dt>Market hours</dt><dd>${esc(HOURS_LABEL[sym.hours])} · ${isMarketOpen(sym.hours) ? 'open now' : 'closed now'}</dd>
-      <dt>History</dt><dd>${historyText(sym)}</dd>
-      <dt>Votes from</dt><dd>${settings.useClosedBar ? 'last closed bar' : 'forming bar'} · tap an indicator for its meaning and formula</dd>
+      <dt>${t('d.source')}</dt><dd><select id="d-source" aria-label="${esc(t('d.source'))}">${opts}</select></dd>
+      <dt>${t('d.hours')}</dt><dd>${esc(t(`hours.${sym.hours}`))} · ${t(isMarketOpen(sym.hours) ? 'd.open' : 'd.closed')}</dd>
+      <dt>${t('d.history')}</dt><dd>${historyText(sym)}</dd>
+      <dt>${t('d.votesFrom')}</dt><dd>${t(settings.useClosedBar ? 'd.lastClosed' : 'd.forming')} · ${t('d.tap')}</dd>
     </dl>
     <div class="seg dtf" id="d-tf">${TIMEFRAMES.map(tf => `<button type="button" data-tf="${tf}" aria-pressed="${tf === state.detailTf}">${tf}</button>`).join('')}</div>
     ${mx}`;
@@ -528,67 +547,57 @@ function closeDetail(pop = false) {
 }
 
 // ---------- settings ----------
-const DATA_ROWS = [
-  ['Binance spot', 'BTC, ETH', 'Real time', 'None'],
-  ['Binance perp (TradFi)', 'Gold, silver, copper, WTI, 7 US stocks', 'Real time, proxy', 'None'],
-  ['Hyperliquid perp', 'WTI, Brent, S&P 500, Nasdaq 100, SMH, EUR/USD, USD/JPY', 'Real time, proxy', 'None'],
-  ['Bybit, OKX', 'Alternatives for crypto, metals, stocks, GBP/USD', 'Real time (proxy for non-crypto)', 'None'],
-  ['Coinbase, Kraken', 'BTC, ETH alternatives', 'Real time', 'None'],
-  ['Twelve Data', '7 forex pairs intraday, ETFs for wheat, corn, soybeans, Dow, Russell, SOXX, long history for seasonality', 'Delayed by the refresh cycle (default 15 min)', 'Free API key'],
-  ['ECB via Frankfurter', '7 forex pairs and DXY without a key', 'End of day, close only', 'None'],
-  ['CFTC', 'COT index for futures markets', 'Weekly (Tuesday positions, out Friday)', 'None'],
-  ['Deribit', 'BTC and ETH options volume profile', '24h statistics, refreshed every 5 min', 'None'],
-];
-const dataTable = () => `<table class="tbl"><thead><tr><th>Source</th><th>Used for</th><th>Delay</th><th>Key</th></tr></thead><tbody>${DATA_ROWS.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-const ABOUT = `<p>Lai Long Scanner™ v${VERSION}. © 2026 Lai Long. All rights reserved. “Lai Long”, the Lai Long logo and the Lai Long Scanner name are trademarks of Lai Long. The software, interface design, signal model and documentation are the intellectual property of Lai Long.</p>
-  <p>Market data © its respective providers. Prices from perpetual contracts and ETFs are proxies and can differ from the underlying market. Signals are mechanical and for information only. Not financial advice.</p>
-  <p><a href="${REPO_URL}" target="_blank" rel="noopener">Source on GitHub</a></p>`;
+const dataTable = () => `<table class="tbl"><thead><tr><th>${t('t.source')}</th><th>${t('t.usedFor')}</th><th>${t('t.delay')}</th><th>${t('t.key')}</th></tr></thead><tbody>${dataRows().map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+const aboutHtml = () => `<p>${esc(t('about.1', { v: VERSION }))}</p><p>${esc(t('about.2'))}</p><p><a href="${REPO_URL}" target="_blank" rel="noopener">${t('about.repo')}</a></p>`;
 
 function renderSettings() {
-  const t = settings.theme, dlg = $('#settings');
+  const th = settings.theme, dlg = $('#settings');
   const srcRows = ASSET_GROUPS.map(g => {
-    const rows = SYMBOLS.filter(s => s.group === g && s.sources.length > 1).map(s => `<label>${s.id}<select data-src="${s.id}">${s.sources.map(x => `<option value="${esc(sourceKey(x))}"${sourceKey(x) === sourceKey(sourceFor(s)) ? ' selected' : ''}${usable(x) ? '' : ' disabled'}>${esc(sourceLabel(x))}${usable(x) ? '' : ' (needs key)'}</option>`).join('')}</select></label>`).join('');
-    return rows ? `<h4 style="margin:10px 0 6px;font-size:12px">${g}</h4><div class="srcs">${rows}</div>` : '';
+    const rows = SYMBOLS.filter(s => s.group === g && s.sources.length > 1).map(s => `<label>${s.id}<select data-src="${s.id}">${s.sources.map(x => `<option value="${esc(sourceKey(x))}"${sourceKey(x) === sourceKey(sourceFor(s)) ? ' selected' : ''}${usable(x) ? '' : ' disabled'}>${esc(sourceLabel(x))}${usable(x) ? '' : ` (${esc(t('kind.needsKey'))})`}</option>`).join('')}</select></label>`).join('');
+    return rows ? `<h4 style="margin:10px 0 6px;font-size:12px">${esc(t(`grp.${g}`))}</h4><div class="srcs">${rows}</div>` : '';
   }).join('');
   dlg.innerHTML = `
-    <div class="sheet-head"><h2>Settings</h2><button class="btn" type="button" data-close>Close</button></div>
+    <div class="sheet-head"><h2>${t('s.title')}</h2><button class="btn" type="button" data-close>${t('d.close')}</button></div>
     <div class="sheet-body">
-      <h3>Appearance</h3>
-      <div class="form">
-        <label>Theme</label>
-        <div class="seg" id="s-preset">${[...Object.keys(PRESETS), 'Custom'].map(p => `<button type="button" data-preset="${p}" aria-pressed="${t.preset === p}">${p}</button>`).join('')}</div>
-        <label for="s-font">Font</label>
-        <select id="s-font">${Object.keys(FONTS).map(f => `<option${f === t.font ? ' selected' : ''}>${f}</option>`).join('')}</select>
-      </div>
-      <p>Pick any colour below to make your own theme. IBM Plex Mono is an open font with a terminal look similar to Bloomberg's own typeface.</p>
-      <div class="colors">${COLOR_KEYS.map(([k, l]) => `<label><input type="color" data-color="${k}" value="${t.colors[k]}">${l}</label>`).join('')}</div>
-      <p><button class="btn" type="button" id="s-reset">Reset to Light</button></p>
+      <h3>${t('s.lang')}</h3>
+      <div class="seg" id="s-lang">${Object.entries(LANGS).map(([k, v]) => `<button type="button" data-lang="${k}" aria-pressed="${lang() === k}">${v}</button>`).join('')}</div>
 
-      <h3>Signals</h3>
+      <h3>${t('s.appearance')}</h3>
       <div class="form">
-        <label for="s-closed">Repainting</label>
-        <label><input type="checkbox" id="s-closed"${settings.useClosedBar ? ' checked' : ''}> Score the last closed bar, so votes do not flicker while a bar is forming</label>
+        <label>${t('s.theme')}</label>
+        <div class="seg" id="s-preset">${[...Object.keys(PRESETS), 'Custom'].map(p => `<button type="button" data-preset="${p}" aria-pressed="${th.preset === p}">${p === 'Custom' ? t('s.custom') : p}</button>`).join('')}</div>
+        <label for="s-font">${t('s.font')}</label>
+        <select id="s-font">${Object.keys(FONTS).map(f => `<option${f === th.font ? ' selected' : ''}>${f}</option>`).join('')}</select>
+      </div>
+      <p>${esc(t('s.colorsHelp'))}</p>
+      <div class="colors">${COLOR_KEYS.map(([k]) => `<label><input type="color" data-color="${k}" value="${th.colors[k]}">${t(`c.color${k[0].toUpperCase()}${k.slice(1)}`)}</label>`).join('')}</div>
+      <p><button class="btn" type="button" id="s-reset">${t('s.reset')}</button></p>
+
+      <h3>${t('s.signals')}</h3>
+      <div class="form">
+        <label for="s-closed">${t('s.repaint')}</label>
+        <label><input type="checkbox" id="s-closed"${settings.useClosedBar ? ' checked' : ''}> ${t('s.closedBar')}</label>
       </div>
 
-      <h3>Twelve Data (optional, free)</h3>
-      <p>Unlocks intraday data for USDCHF, AUDUSD, USDCAD, NZDUSD, EURJPY, GBPJPY and EURGBP, the ETFs used for wheat, corn, soybeans, Dow Jones, Russell 2000 and semiconductors, and long monthly history for the seasonal index. Your key is stored only in this browser and is sent only to api.twelvedata.com. <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener">Get a free key</a>.</p>
+      <h3>${t('s.td')}</h3>
+      <p>${esc(t('s.tdHelp'))} <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener">${t('s.tdGet')}</a>.</p>
       <div class="form">
-        <label for="s-tdkey">API key</label>
-        <div style="display:flex;gap:6px"><input id="s-tdkey" type="password" autocomplete="off" spellcheck="false" value="${esc(settings.tdKey)}" style="flex:1"><button class="btn" type="button" id="s-tdshow">Show</button></div>
-        <label for="s-tdmin">Refresh every (minutes)</label>
+        <label for="s-tdkey">${t('s.tdKey')}</label>
+        <div style="display:flex;gap:6px"><input id="s-tdkey" type="password" autocomplete="off" spellcheck="false" value="${esc(settings.tdKey)}" style="flex:1"><button class="btn" type="button" id="s-tdshow">${t('s.show')}</button></div>
+        <label for="s-tdmin">${t('s.tdEvery')}</label>
         <input id="s-tdmin" type="number" min="5" max="240" step="1" value="${settings.tdRefreshMin}">
-        <label>Used today</label><span>${tdUsedToday()} of 800 free credits</span>
+        <label>${t('s.tdUsed')}</label><span>${t('s.tdCredits', { n: tdUsedToday() })}</span>
       </div>
 
-      <h3>Data source per symbol</h3>
-      <p>The first source that works is used by default. Sources marked "needs key" become available after you add a Twelve Data key.</p>
+      <h3>${t('s.perSymbol')}</h3>
+      <p>${esc(t('s.perSymbolHelp'))}</p>
       ${srcRows}
 
-      <h3>Data and delays</h3>
+      <h3>${t('s.delays')}</h3>
       ${dataTable()}
 
-      <h3>About</h3>
-      ${ABOUT}
+      <h3>${t('s.about')}</h3>
+      ${aboutHtml()}
     </div>`;
 }
 
@@ -598,9 +607,22 @@ function setTheme(patch) {
   save();
 }
 
+function changeLang(l) {
+  settings.lang = l;
+  setLang(l);
+  save();
+  applyStaticText();
+  renderControls();
+  render();
+  if ($('#settings').open) renderSettings();
+  if ($('#legend').open) renderLegend();
+}
+
 function bindSettings() {
   const dlg = $('#settings');
   dlg.addEventListener('click', e => {
+    const l = e.target.closest('[data-lang]');
+    if (l) { changeLang(l.dataset.lang); return; }
     const p = e.target.closest('[data-preset]');
     if (p) {
       const name = p.dataset.preset;
@@ -609,8 +631,8 @@ function bindSettings() {
       return;
     }
     if (e.target.id === 's-reset') { setTheme({ preset: 'Light', font: 'IBM Plex Mono', colors: { ...PRESETS.Light } }); renderSettings(); return; }
-    if (e.target.id === 's-tdshow') { const i = $('#s-tdkey'); i.type = i.type === 'password' ? 'text' : 'password'; e.target.textContent = i.type === 'password' ? 'Show' : 'Hide'; return; }
-    if (e.target.closest('[data-close]')) dlg.close();
+    if (e.target.id === 's-tdshow') { const i = $('#s-tdkey'); i.type = i.type === 'password' ? 'text' : 'password'; e.target.textContent = t(i.type === 'password' ? 's.show' : 's.hide'); return; }
+    if (e.target.closest('[data-close]') || e.target === dlg) dlg.close();
   });
   dlg.addEventListener('input', e => {
     const c = e.target.dataset.color;
@@ -620,16 +642,16 @@ function bindSettings() {
     }
   });
   dlg.addEventListener('change', e => {
-    const t = e.target;
-    if (t.id === 's-font') setTheme({ font: t.value });
-    else if (t.id === 's-closed') { settings.useClosedBar = t.checked; save(); render(); }
-    else if (t.id === 's-tdkey') {
-      settings.tdKey = t.value.trim(); save();
+    const el = e.target;
+    if (el.id === 's-font') setTheme({ font: el.value });
+    else if (el.id === 's-closed') { settings.useClosedBar = el.checked; save(); render(); }
+    else if (el.id === 's-tdkey') {
+      settings.tdKey = el.value.trim(); save();
       state.monthly.clear();
       renderSettings(); reloadAfterSourceChange();
-    } else if (t.id === 's-tdmin') { settings.tdRefreshMin = Math.min(240, Math.max(5, Math.round(+t.value) || 15)); save(); }
-    else if (t.dataset.src) {
-      settings.sources[t.dataset.src] = t.value; save();
+    } else if (el.id === 's-tdmin') { settings.tdRefreshMin = Math.min(240, Math.max(5, Math.round(+el.value) || 15)); save(); }
+    else if (el.dataset.src) {
+      settings.sources[el.dataset.src] = el.value; save();
       reloadAfterSourceChange();
     }
   });
@@ -647,66 +669,77 @@ function reloadAfterSourceChange() {
 
 // ---------- legend ----------
 function renderLegend() {
-  const badge = (cls, text, desc) => `<div><span class="badge b-${cls}">${text}</span><span>${desc}</span></div>`;
-  const v = (cls, text, desc) => `<div><span class="v ${cls}">${text}</span><span>${desc}</span></div>`;
-  const inds = GROUPS.map(g => `<h4 style="margin:16px 0 4px;font-size:13px">${g.name}${g.votes ? ' · votes in Total' : ' · context, no vote'}</h4>` +
-    INDICATORS.filter(d => d.group === g.id).map(d => `<div class="ind"><h4>${esc(d.name)}</h4>
-      <p><span class="k">What it measures.</span> ${esc(d.what)}</p>
-      <p><span class="k">Formula.</span> ${esc(d.formula)}</p>
-      <p><span class="k">Signal.</span> ${esc(d.rule)}</p></div>`).join('')).join('');
+  const badge = (cls, text, desc) => `<div><span class="badge b-${cls}">${esc(text)}</span><span>${esc(desc)}</span></div>`;
+  const v = (cls, text, desc) => `<div><span class="v ${cls}">${esc(text)}</span><span>${esc(desc)}</span></div>`;
+  const inds = GROUPS.map(g => `<h4 style="margin:16px 0 4px;font-size:13px">${esc(groupName(g))} · ${t(g.votes ? 'l.votesIn' : 'l.contextNoVote')}</h4>` +
+    INDICATORS.filter(d => d.group === g.id).map(d => `<div class="ind"><h4>${esc(indText(d, 'name'))}</h4>
+      <p><span class="k">${t('d.what')}</span> ${esc(indText(d, 'what'))}</p>
+      <p><span class="k">${t('d.formula')}</span> ${esc(indText(d, 'formula'))}</p>
+      <p><span class="k">${t('d.signal')}</span> ${esc(indText(d, 'rule'))}</p></div>`).join('')).join('');
   $('#legend').innerHTML = `
-    <div class="sheet-head"><h2>Legend and formulas</h2><button class="btn" type="button" data-close>Close</button></div>
+    <div class="sheet-head"><h2>${t('l.title')}</h2><button class="btn" type="button" data-close>${t('d.close')}</button></div>
     <div class="sheet-body">
-      <h3>Data badges, next to every symbol</h3>
+      <h3>${t('l.badges')}</h3>
       <div class="lg">
-        ${badge('live', 'Live', 'Real-time price of the asset itself.')}
-        ${badge('proxy', 'Proxy · live', 'Real-time perpetual contract that tracks the asset, not the underlying market price.')}
-        ${badge('off', 'Proxy · off-hours', 'The underlying market is closed; the perp keeps trading.')}
-        ${badge('delay', 'Delayed 8m', 'Measured age of the latest data, not a fixed promise.')}
-        ${badge('eod', 'EOD Oct 23', 'End-of-day reference rate with its date. Close only.')}
-        ${badge('proxy', 'ETF · live', 'An ETF used as a stand-in for an index or commodity.')}
-        ${badge('nokey', 'Needs key', 'Add a free Twelve Data key in Settings.')}
-        ${badge('err', 'Error', 'The source failed; hover for the reason.')}
+        ${badge('live', t('b.live'), t('l.live'))}
+        ${badge('proxy', t('b.proxy'), t('l.proxy'))}
+        ${badge('off', t('b.off'), t('l.off'))}
+        ${badge('delay', t('b.delayed', { age: fmtAge(8 * 60_000) }), t('l.delayed'))}
+        ${badge('eod', t('b.eod', { date: fmtDay(Date.UTC(2026, 9, 23) / 1000) }), t('l.eod'))}
+        ${badge('proxy', t('b.etfLive'), t('l.etf'))}
+        ${badge('nokey', t('b.nokey'), t('l.nokey'))}
+        ${badge('err', t('b.error'), t('l.error'))}
       </div>
-      <h3>Signal symbols</h3>
+      <h3>${t('l.symbols')}</h3>
       <div class="lg">
-        ${v('B', '↑', 'Bullish vote')}
-        ${v('S', '↓', 'Bearish vote')}
-        ${v('N', '→', 'Neutral vote')}
-        ${v('X', '–', 'Not available for this source; hover for the reason')}
-        ${v('W', 'Low', 'Not enough history for this indicator')}
-        ${v('A', 'Strong', 'Highlighted state: strong trend, expanding bands, high volume')}
-        ${v('W', 'Squeeze', 'Warning state: flat trend, squeeze, COT extreme')}
-        ${v('N', '58 ↑', 'Value with its vote, for example RSI 58 bullish')}
+        ${v('B', '↑', t('l.up'))}
+        ${v('S', '↓', t('l.down'))}
+        ${v('N', '→', t('l.flat'))}
+        ${v('X', '–', t('l.na'))}
+        ${v('W', t('na.Low'), t('l.low'))}
+        ${v('A', t('st.Strong'), t('l.accent'))}
+        ${v('W', t('st.Squeeze'), t('l.warn'))}
+        ${v('N', '58 ↑', t('l.value'))}
       </div>
-      <h3>Columns</h3>
+      <h3>${t('l.columns')}</h3>
       <div class="lg">
-        ${GROUPS.map(g => `<div><b style="font-weight:600;min-width:46px">${g.short}</b><span>${g.name}: ${INDICATORS.filter(d => d.group === g.id).map(d => d.name).join(', ')}.${g.votes ? '' : ' No vote.'}</span></div>`).join('')}
+        ${GROUPS.map(g => `<div><b style="font-weight:600;min-width:46px">${esc(groupShort(g))}</b><span>${esc(groupName(g))}: ${INDICATORS.filter(d => d.group === g.id).map(d => esc(indText(d, 'name'))).join(', ')}.${g.votes ? '' : ` ${t('l.noVote')}`}</span></div>`).join('')}
       </div>
-      <h3>Total</h3>
+      <h3>${t('l.total')}</h3>
       <div class="lg">
-        ${v('B', 'Strong buy', 'Average group vote above +0.5 and ADX strong')}
-        ${v('B', 'Buy', 'Average group vote above +0.1')}
-        ${v('N', 'Neutral', 'Groups disagree')}
-        ${v('N', 'Wait', 'ADX flat: the market is ranging')}
-        ${v('S', 'Sell', 'Average group vote below −0.1')}
-        ${v('S', 'Strong sell', 'Average group vote below −0.5 and ADX strong')}
+        ${v('B', t('tot.Strong buy'), t('l.sbuy'))}
+        ${v('B', t('tot.Buy'), t('l.buy'))}
+        ${v('N', t('tot.Neutral'), t('l.neutral'))}
+        ${v('N', t('tot.Wait'), t('l.wait'))}
+        ${v('S', t('tot.Sell'), t('l.sell'))}
+        ${v('S', t('tot.Strong sell'), t('l.ssell'))}
       </div>
-      <p>Each voting group gives one vote: the average of its indicators' votes, rounded to ↑ (above +0.2), ↓ (below −0.2) or →. Total is the average of the group votes, so a group with many indicators does not outweigh the others. Strength and Volatility act as filters, Macro is context. Notation in formulas: H, L, C = high, low, close; t = current bar; HHₙ and LLₙ = highest high and lowest low of n bars.</p>
-      <h3>Indicators</h3>
+      <p>${esc(t('l.rules'))} ${esc(t('l.notation'))}</p>
+      <h3>${t('l.indicators')}</h3>
       ${inds}
-      <h3>Data and delays</h3>
+      <h3>${t('s.delays')}</h3>
       ${dataTable()}
-      <h3>About</h3>
-      ${ABOUT}
+      <h3>${t('s.about')}</h3>
+      ${aboutHtml()}
     </div>`;
 }
 
-// ---------- controls ----------
+// ---------- static text and controls ----------
+function applyStaticText() {
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); el.title = t(el.dataset.i18nAria); });
+  $('#search').placeholder = t('search');
+  $('#search').setAttribute('aria-label', t('search.aria'));
+  const lb = $('#btn-lang');
+  lb.textContent = lang() === 'vi' ? 'EN' : 'VI';
+  lb.title = t('nav.lang');
+  lb.setAttribute('aria-label', t('nav.lang'));
+}
+
 function renderControls() {
   $('#tf').innerHTML = TIMEFRAMES.map(tf => `<button type="button" data-tf="${tf}" aria-pressed="${tf === settings.tf}">${tf}</button>`).join('');
-  $('#groups').innerHTML = ['All', ...ASSET_GROUPS].map(g => `<button type="button" data-group="${g}" aria-pressed="${g === settings.group}">${g}</button>`).join('');
-  $('#sort').value = settings.sort;
+  $('#groups').innerHTML = ['All', ...ASSET_GROUPS].map(g => `<button type="button" data-group="${g}" aria-pressed="${g === settings.group}">${esc(t(`grp.${g}`))}</button>`).join('');
+  $('#sort').innerHTML = ['default', 'total', 'change'].map(s => `<option value="${s}"${settings.sort === s ? ' selected' : ''}>${t(`sort.${s}`)}</option>`).join('');
 }
 
 function bindUi() {
@@ -732,8 +765,8 @@ function bindUi() {
     if (e.target.closest('[data-close]')) return closeDetail();
     const i = e.target.closest('[data-info]');
     if (i) { state.info = state.info === i.dataset.info ? null : i.dataset.info; renderDetail(); return; }
-    const t = e.target.closest('[data-tf]');
-    if (t) { state.detailTf = t.dataset.tf; renderDetail(); }
+    const b = e.target.closest('[data-tf]');
+    if (b) { state.detailTf = b.dataset.tf; renderDetail(); }
   });
   $('#detail').addEventListener('change', e => {
     if (e.target.id === 'd-source') {
@@ -741,10 +774,10 @@ function bindUi() {
       reloadAfterSourceChange();
     }
   });
+  $('#btn-lang').addEventListener('click', () => changeLang(lang() === 'vi' ? 'en' : 'vi'));
   $('#btn-settings').addEventListener('click', () => { renderSettings(); $('#settings').showModal(); });
   $('#btn-legend').addEventListener('click', () => { renderLegend(); $('#legend').showModal(); });
   $('#legend').addEventListener('click', e => { if (e.target.closest('[data-close]') || e.target === $('#legend')) $('#legend').close(); });
-  $('#settings').addEventListener('click', e => { if (e.target === $('#settings')) $('#settings').close(); });
   bindSettings();
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.open && !document.querySelector('dialog[open]')) closeDetail(); });
   window.addEventListener('popstate', () => {
@@ -759,6 +792,7 @@ function bindUi() {
 
 // ---------- start ----------
 applyTheme(settings.theme);
+applyStaticText();
 renderControls();
 bindUi();
 render();

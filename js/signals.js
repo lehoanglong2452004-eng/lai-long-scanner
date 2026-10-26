@@ -1,6 +1,7 @@
 // Turns candles into the scanner's votes: one entry per indicator, one vote per group,
 // and a Total that uses Strength and Volatility as filters rather than votes.
 import * as ta from './indicators.js';
+import { t, tr, monthName } from './i18n.js';
 
 const { isNum } = ta;
 
@@ -117,6 +118,8 @@ const NOTES = {
     'Rₘ,ᵧ = Close(month m, year y) / Close(month m − 1, year y) − 1. Seasonal = mean of Rₘ over the last up to 15 years. Win rate = share of years with Rₘ > 0. Needs at least 5 years.'],
 };
 for (const d of INDICATORS) [d.what, d.formula] = NOTES[d.id];
+// Values that do not depend on the chart timeframe (shown once in the detail view).
+for (const id of ['big', 'ovp', 'w52', 'cot', 'seas']) INDICATORS.find(d => d.id === id).tfFree = true;
 
 export const INTRADAY = new Set(['M5', 'M15', 'H1', 'H4']);
 
@@ -185,17 +188,18 @@ export function evaluate(series, ctx) {
         const d = get('dmi', () => ta.DMI(c)), v = d.adx[e];
         if (!isNum(v)) return null;
         const state = v > 25 ? 'Strong' : v >= 20 ? 'Weak' : 'Flat';
-        return { vote: sign(d.pdi[e] - d.mdi[e]), text: `${state} ${v.toFixed(0)}`, state, stateOnly: true };
+        return { vote: sign(d.pdi[e] - d.mdi[e]), text: `${tr('st', state)} ${v.toFixed(0)}`, state, stateOnly: true };
       }
       case 'chop': {
         const v = ta.choppiness(c)[e];
         if (!isNum(v)) return null;
-        return { text: v > 61.8 ? 'Ranging' : v < 38.2 ? 'Trending' : 'Mixed', stateOnly: true };
+        const state = v > 61.8 ? 'Ranging' : v < 38.2 ? 'Trending' : 'Mixed';
+        return { text: tr('st', state), state, stateOnly: true };
       }
       case 'rsi': {
         const v = ta.RSI(cl, 14)[e];
         if (!isNum(v)) return null;
-        return { vote: sign(v - 50), text: v.toFixed(0) + (v > 70 ? ' OB' : v < 30 ? ' OS' : '') };
+        return { vote: sign(v - 50), text: v.toFixed(0) + (v > 70 ? ` ${t('st.OB')}` : v < 30 ? ` ${t('st.OS')}` : '') };
       }
       case 'macd': { const m = ta.MACD(cl); return isNum(m.hist[e]) ? { vote: sign(m.hist[e]) } : null; }
       case 'cci': { const v = ta.CCI(c, 20)[e]; return isNum(v) ? { vote: sign(v), text: v.toFixed(0) } : null; }
@@ -207,7 +211,7 @@ export function evaluate(series, ctx) {
         const squeeze = bb.upper[e] < kc.upper[e] && bb.lower[e] > kc.lower[e];
         const expanding = isNum(w(e - 5)) && w(e) > w(e - 5) * 1.2;
         const state = squeeze ? 'Squeeze' : expanding ? 'Expanding' : 'Normal';
-        return { text: state, state, stateOnly: true };
+        return { text: tr('st', state), state, stateOnly: true };
       }
       case 'don': {
         const d = ta.donchian(c, 20), r = d.upper[e] - d.lower[e];
@@ -219,12 +223,13 @@ export function evaluate(series, ctx) {
         const avg = ta.SMA(ta.volumes(c), 20)[e - 1];
         if (!isNum(avg) || !avg) return null;
         const r = c[e].volume / avg;
-        return { text: r >= 2 ? `Spike ×${r.toFixed(1)}` : `×${r.toFixed(1)}`, stateOnly: true };
+        return { text: r >= 2 ? `${t('st.Spike')} ×${r.toFixed(1)}` : `×${r.toFixed(1)}`, state: r >= 2 ? 'Spike' : 'Normal', stateOnly: true };
       }
       case 'rvol': {
         const r = ta.RVOL(c, e, INTRADAY.has(ctx.tf));
         if (!isNum(r.value)) return { na: 'Low history' };
-        return { text: `${r.value >= 2 ? 'High' : r.value <= 0.5 ? 'Quiet' : 'Normal'} ${r.value.toFixed(1)}×`, stateOnly: true };
+        const state = r.value >= 2 ? 'High' : r.value <= 0.5 ? 'Quiet' : 'Normal';
+        return { text: `${tr('st', state)} ${r.value.toFixed(1)}×`, state, stateOnly: true };
       }
       case 'obv': { const o = ta.OBV(c), m = ta.EMA(o, 20)[e]; return isNum(m) ? { vote: sign(o[e] - m) } : null; }
       case 'mfi': { const v = ta.MFI(c, 14)[e]; return isNum(v) ? { vote: sign(v - 50), text: v.toFixed(0) } : null; }
@@ -235,7 +240,7 @@ export function evaluate(series, ctx) {
       case 'big': {
         const t = ctx.trades;
         if (!t) return null;
-        return { vote: sign(t.buys - t.sells), text: t.buys + t.sells ? `${t.buys}B / ${t.sells}S` : 'None' };
+        return { vote: sign(t.buys - t.sells), text: t.buys + t.sells ? `${t.buys}${tr('st', 'buys')} / ${t.sells}${tr('st', 'sells')}` : tr('st', 'None') };
       }
       case 'ovp': {
         const p = ta.optionsProfile(ctx.options.list);
@@ -250,8 +255,8 @@ export function evaluate(series, ctx) {
           if (dist < 0) continue;
           if (!best || dist < best.dist) best = { ...g, dist };
         }
-        if (!best) return { vote: 0, text: 'None' };
-        return { vote: best.type, text: `${best.type === 1 ? 'Bull' : 'Bear'} ${(best.dist * 100).toFixed(2)}%` };
+        if (!best) return { vote: 0, text: tr('st', 'None') };
+        return { vote: best.type, text: `${tr('st', best.type === 1 ? 'Bull' : 'Bear')} ${(best.dist * 100).toFixed(2)}%` };
       }
       case 'sr': {
         const a = atr()[e];
@@ -259,9 +264,9 @@ export function evaluate(series, ctx) {
         const lv = ta.swingLevels(c);
         const sup = Math.max(...lv.lows.filter(v => v < x)), res = Math.min(...lv.highs.filter(v => v > x));
         const ds = isNum(sup) ? (x - sup) / a : Infinity, dr = isNum(res) ? (res - x) / a : Infinity;
-        if (ds <= 0.5 && ds <= dr) return { vote: 1, text: `S ${ds.toFixed(1)} ATR` };
-        if (dr <= 0.5) return { vote: -1, text: `R ${dr.toFixed(1)} ATR` };
-        return { vote: 0, text: 'Mid-range' };
+        if (ds <= 0.5 && ds <= dr) return { vote: 1, text: `${tr('st', 'sup')} ${ds.toFixed(1)} ATR` };
+        if (dr <= 0.5) return { vote: -1, text: `${tr('st', 'res')} ${dr.toFixed(1)} ATR` };
+        return { vote: 0, text: tr('st', 'Mid-range') };
       }
       case 'piv': {
         let H, L, C;
@@ -275,19 +280,19 @@ export function evaluate(series, ctx) {
           H = p.high; L = p.low; C = p.close;
         }
         const P = (H + L + C) / 3;
-        return { vote: sign(x - P), text: x > P ? 'Above P' : 'Below P' };
+        return { vote: sign(x - P), text: tr('st', x > P ? 'Above P' : 'Below P') };
       }
       case 'twap': { const v = ta.TWAP(c)[e]; return isNum(v) ? { vote: sign(x - v) } : null; }
       case 'cdl': {
         const p = ta.candlePattern(c, e);
-        return p ? { vote: p.dir, text: p.name } : { vote: 0, text: 'None' };
+        return p ? { vote: p.dir, text: tr('cdl', p.name) } : { vote: 0, text: tr('st', 'None') };
       }
       case 'w52': {
         const d = ctx.daily;
         const last = d[d.length - 1].time, yr = d.filter(k => k.time > last - 365 * 86400);
         const hi = Math.max(...yr.map(k => k.high)), lo = Math.min(...yr.map(k => k.low));
         const fromHi = (price / hi - 1) * 100, fromLo = (price / lo - 1) * 100;
-        return { text: Math.abs(fromHi) <= Math.abs(fromLo) ? `${fromHi.toFixed(1)}% vs high` : `+${fromLo.toFixed(1)}% vs low`, stateOnly: true };
+        return { text: Math.abs(fromHi) <= Math.abs(fromLo) ? `${fromHi.toFixed(1)}% ${t('st.vsHigh')}` : `+${fromLo.toFixed(1)}% ${t('st.vsLow')}`, stateOnly: true };
       }
       case 'chg': {
         const v = changeOver(all, price, ctx.tf === 'W1' ? 7 * 86400 : 86400);
@@ -296,14 +301,13 @@ export function evaluate(series, ctx) {
       case 'cot': {
         const k = ta.cotIndex(ctx.cot.rows, 156, ctx.cot.invert);
         if (k.weeks < 52) return { na: 'Low history' };
-        return { text: `Specs ${k.spec.toFixed(0)} · Comm ${k.comm.toFixed(0)}`, short: k.spec.toFixed(0), cot: k, stateOnly: true, extreme: k.spec >= 80 ? 1 : k.spec <= 20 ? -1 : 0 };
+        return { text: `${t('st.Specs')} ${k.spec.toFixed(0)} · ${t('st.Comm')} ${k.comm.toFixed(0)}`, short: k.spec.toFixed(0), cot: k, stateOnly: true, extreme: k.spec >= 80 ? 1 : k.spec <= 20 ? -1 : 0 };
       }
       case 'seas': {
         const s = ta.seasonal(ctx.monthly);
         if (s.n < 5) return { na: 'Low history' };
         const pct = (s.avg * 100).toFixed(1), win = Math.round((s.avg >= 0 ? s.win : 1 - s.win) * 100);
-        const month = new Date(Date.UTC(2000, s.m, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
-        return { text: `${month} ${s.avg >= 0 ? '+' : ''}${pct}% · ${win}% ${s.avg >= 0 ? 'up' : 'down'} (${s.n}y)`, short: `${s.avg >= 0 ? '+' : ''}${pct}%`, seasonal: s, stateOnly: true, tendency: win >= 70 ? Math.sign(s.avg) : 0 };
+        return { text: `${monthName(s.m)} ${s.avg >= 0 ? '+' : ''}${pct}% · ${win}% ${t(s.avg >= 0 ? 'st.up' : 'st.down')} (${s.n}${t('st.years')})`, short: `${s.avg >= 0 ? '+' : ''}${pct}%`, seasonal: s, stateOnly: true, tendency: win >= 70 ? Math.sign(s.avg) : 0 };
       }
     }
     return null;
@@ -318,8 +322,8 @@ export function evaluate(series, ctx) {
         const r = !ind.cot.na ? ind.cot : ind.seas;
         const isCot = r === ind.cot;
         const title = isCot
-          ? `COT index ${r.text}${r.extreme > 0 ? ', speculators near their most long in 3 years' : r.extreme < 0 ? ', speculators near their most short in 3 years' : ''}`
-          : `Seasonal: ${r.text}`;
+          ? t('mc.cot', { text: r.text }) + (r.extreme > 0 ? t('mc.cotHigh') : r.extreme < 0 ? t('mc.cotLow') : '')
+          : t('mc.seas', { text: r.text });
         groups.mc = r.na ? { na: r.na } : { text: isCot ? `COT ${r.short}` : r.short, tone: isCot ? r.extreme : r.tendency, title };
         continue;
       }
@@ -339,12 +343,13 @@ export function evaluate(series, ctx) {
   if (!dirs.length) total = { na: groups.tr.na || 'No data' };
   else {
     const s = dirs.reduce((a, b) => a + b, 0) / dirs.length;
-    if (strength === 'Flat') total = { label: 'Wait', cls: 'N' };
-    else if (s > 0.5) total = { label: strength === 'Strong' ? 'Strong buy' : 'Buy', cls: 'B' };
-    else if (s > 0.1) total = { label: 'Buy', cls: 'B' };
-    else if (s < -0.5) total = { label: strength === 'Strong' ? 'Strong sell' : 'Sell', cls: 'S' };
-    else if (s < -0.1) total = { label: 'Sell', cls: 'S' };
-    else total = { label: 'Neutral', cls: 'N' };
+    if (strength === 'Flat') total = { code: 'Wait', cls: 'N' };
+    else if (s > 0.5) total = { code: strength === 'Strong' ? 'Strong buy' : 'Buy', cls: 'B' };
+    else if (s > 0.1) total = { code: 'Buy', cls: 'B' };
+    else if (s < -0.5) total = { code: strength === 'Strong' ? 'Strong sell' : 'Sell', cls: 'S' };
+    else if (s < -0.1) total = { code: 'Sell', cls: 'S' };
+    else total = { code: 'Neutral', cls: 'N' };
+    total.label = tr('tot', total.code);
     total.score = s;
   }
   return { ind, groups, total, strength, squeeze: ind.sq.na ? null : ind.sq.state, change: ind.chg.na ? NaN : ind.chg.value };
