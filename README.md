@@ -28,6 +28,20 @@ Each voting group averages its indicators into one vote (↑, ↓ or →). **Tot
 with many indicators cannot outweigh the others. Votes use the last closed bar by default, so they do not repaint.
 Open the **?** button in the app for every indicator's meaning, formula and signal rule.
 
+### Lai Long Follow Trend (LL Follow)
+
+The first column after the price is **LL Follow**, an independent trend-following indicator. It does **not** vote in
+Total. It reads price structure on the chosen timeframe and a higher one (M5→H1, M15 and H1→H4, H4→D1, D1→W1,
+W1→month), support and resistance zones confirmed by absorbing volume (V/W), and VWAPs anchored at the swings that
+start each trend. The cell shows the most specific fact: a fresh breakout signal (A, B1, B2 with grade, at most 5 bars
+old), a breakout being tracked, the trend with or against the higher timeframe, or the state when there is no trend.
+The detail panel opens with its own section above Total: both trends, state score, breakout, last signal with SL/TP,
+nearest support and resistance, and the distance from the origin VWAP. It needs OHLC and volume, so close-only and
+volume-less sources show a reason instead.
+
+`js/llft.js` is a copy of the shared Lai Long Follow Trend core, also used by Lai Long View; keep the copies
+identical. `js/follow.js` adapts the scanner's candles to it.
+
 ## Data sources and delays
 
 Every symbol has a badge next to it: **Live**, **Proxy · live**, **Proxy · off-hours**, **Delayed Nm**, **EOD date** or **Needs key**.
@@ -63,7 +77,8 @@ Then open http://localhost:5173.
 npm test
 ```
 
-runs the indicator tests, which compare RSI, MACD, ADX and SuperTrend with TradingView Pine definitions.
+runs the indicator tests, which compare RSI, MACD, ADX and SuperTrend with TradingView Pine definitions, and the
+Lai Long Follow Trend tests (reason codes, higher timeframe, no lookahead, invariants on recorded ETH 15m data).
 
 ```bash
 node tools/smoke.mjs H1

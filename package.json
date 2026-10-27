@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Free multi-asset market scanner: forex, crypto, commodities, indices and US tech stocks, with grouped indicator votes.",
   "scripts": {
-    "test": "node tests/indicators.test.mjs",
+    "test": "node tests/indicators.test.mjs && node tests/llft.test.mjs",
     "dev": "node tools/serve.mjs"
   }
 }

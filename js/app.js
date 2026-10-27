@@ -3,6 +3,8 @@
 import { SYMBOLS, SYMBOL_BY_ID, ASSET_GROUPS } from './symbols.js';
 import { ADAPTERS, TF, TIMEFRAMES, sourceKey, sourceLabel, optionsSummary, OPTIONS_CURRENCY, cotHistory, tdUsedToday } from './sources.js';
 import { evaluate, INDICATORS, GROUPS } from './signals.js';
+import { followTrend, followState, zoneDistance, loadsHtf, LLFT_HTF } from './follow.js';
+import { regimeLabel, zoneName, TEXT as LLFT_TEXT } from './llft.js';
 import { isMarketOpen } from './hours.js';
 import { loadSettings, saveSettings } from './store.js';
 import { PRESETS, FONTS, COLOR_KEYS, applyTheme } from './theme.js';
@@ -35,6 +37,7 @@ const state = {
   monthly: new Map(),  // id -> { candles?, na?, at, key }
   cot: { status: 'idle', data: null, error: null, at: 0 },
   evals: new Map(),
+  llft: new Map(),     // `${id}|${tf}` -> { sig, r } Lai Long Follow Trend
   errors: new Map(),   // adapter -> last price polling error
   open: null,
   detailTf: settings.tf,
@@ -105,6 +108,9 @@ function loadAll(tf) {
   const jobs = SYMBOLS.map(sym => loadSeries(sym, tf));
   // End-of-day symbols also need their daily series for the price and the EOD badge.
   for (const sym of SYMBOLS) if (sourceFor(sym).source === 'ecb' && tf !== 'D1') jobs.push(loadSeries(sym, 'D1'));
+  // Lai Long Follow Trend reads the real higher timeframe; queued after the table's own series.
+  const htf = LLFT_HTF[tf];
+  if (htf) for (const sym of SYMBOLS) if (loadsHtf(sourceFor(sym))) loadSeries(sym, htf);
   return Promise.allSettled(jobs);
 }
 
@@ -236,6 +242,24 @@ function evalFor(sym, tf) {
   return r;
 }
 
+// Lai Long Follow Trend: independent of evaluate(), so it never reaches Total.
+function llftFor(sym, tf) {
+  const key = sourceKey(sourceFor(sym)), s = state.series.get(`${sym.id}|${tf}`);
+  if (!s || s.key !== key) return null;
+  const h = LLFT_HTF[tf] ? state.series.get(`${sym.id}|${LLFT_HTF[tf]}`) : null;
+  const htf = h?.candles && h.key === key ? h : null;
+  const last = s.candles?.[s.candles.length - 1];
+  const closed = !last || (last.time + TF[tf].sec) * 1000 <= Date.now();
+  // Live prices patch the forming bar in place, so it is part of the signature only when it is used.
+  const live = !settings.useClosedBar && !closed ? `${last.close}|${last.high}|${last.low}` : '';
+  const sig = [s.fetchedAt, settings.useClosedBar, closed, live, htf?.fetchedAt].join('|');
+  const k = `${sym.id}|${tf}`, memo = state.llft.get(k);
+  if (memo && memo.sig === sig) return memo.r;
+  const r = followTrend(s, TF[tf].sec, { htf, useClosedBar: settings.useClosedBar });
+  state.llft.set(k, { sig, r });
+  return r;
+}
+
 function priceFor(sym, tf) {
   const d = sourceFor(sym), pr = state.prices.get(sym.id);
   if (pr && pr.key === sourceKey(d)) return pr.price;
@@ -357,6 +381,44 @@ function totalCell(r) {
   return `<span class="v ${r.total.cls}" title="${esc(t('tot.title', { score: r.total.score.toFixed(2), n }))}">${esc(r.total.label)}</span>`;
 }
 
+// ---------- Lai Long Follow Trend cells ----------
+const fmtPct = v => isNum(v) ? `${v > 0 ? '+' : ''}${v.toFixed(Math.abs(v) < 10 ? 2 : 1)}%` : '–';
+const lfText = () => LLFT_TEXT[lang()];
+const lfDash = '<span class="v X">–</span>';
+
+function llftLabel(st) {
+  if (st.code === 'signal') return `${st.signal.type} ${ARROW[st.dir]} · ${st.signal.grade}`;
+  const word = st.code in lfText().regime ? lfText().regime[st.code] : t(`lf.${st.code}`);
+  return st.dir ? `${word} ${ARROW[st.dir]}` : word;
+}
+
+function llftSignalText(sg, dp) {
+  return t('lf.t.sig', {
+    type: sg.type, side: t(sg.dir > 0 ? 'lf.buy' : 'lf.sell'), grade: sg.grade, score: sg.score, n: sg.barsAgo,
+    entry: fmtPrice(sg.entry, dp), sl: fmtPrice(sg.sl, dp), tp: fmtPrice(sg.tp, dp), rr: sg.rr.toFixed(1),
+  });
+}
+
+// One line per fact, for the tooltip: higher timeframe, chart, breakout being tracked, last signal.
+function llftTitle(r, tf, dp) {
+  const L = r.last, T = lfText();
+  const lines = [isNum(L.regimeHtf)
+    ? t('lf.t.htf', { tf: LLFT_HTF[tf] ?? 'MN', trend: T.trend[L.htfTrend], regime: T.regime[regimeLabel(L.regimeHtf)], score: Math.round(L.regimeHtf) })
+    : t('lf.t.noHtf')];
+  lines.push(t('lf.t.chart', { trend: T.trend[L.trend], regime: T.regime[regimeLabel(L.regime)], score: Math.round(L.regime) }));
+  if (L.breakout) lines.push(t('lf.t.brk', { arrow: ARROW[L.breakout.dir], stage: T.stage[L.breakout.stage] }));
+  if (L.signal) lines.push(llftSignalText(L.signal, dp));
+  return lines.join('\n');
+}
+
+function llftCell(r, tf, sym, full = false) {
+  if (!r) return '<span class="v X">…</span>';
+  if (r.na) return full ? `<span class="v ${r.na === 'Low history' ? 'W' : 'X'}">${esc(naText(r.na))}</span>` : naCell(r.na);
+  const st = followState(r);
+  if (!st) return lfDash;
+  return `<span class="v ${st.cls}" title="${esc(llftTitle(r, tf, sym.dp))}">${esc(llftLabel(st))}</span>`;
+}
+
 function filteredSymbols() {
   const q = $('#search').value.trim().toLowerCase();
   let list = SYMBOLS.filter(s => (settings.group === 'All' || s.group === settings.group)
@@ -372,9 +434,10 @@ function rowHtml(sym) {
   const tf = settings.tf, d = sourceFor(sym), b = badgeFor(sym, tf), r = evalFor(sym, tf);
   const chg = changeFor(sym, tf);
   return `<div class="row" role="row" tabindex="0" data-id="${sym.id}"${state.open === sym.id ? ' aria-current="true"' : ''}>
-    <div class="c sym"><span class="tk">${sym.id}</span><span class="badge b-${b.cls}" title="${esc(b.title)}">${esc(b.text)}</span><span class="nm">${esc(symbolName(sym))}</span></div>
+    <div class="c sym"><span class="tk">${sym.id}</span><span class="badge b-${b.cls}" title="${esc(b.title)}">${esc(b.text)}</span><span class="nm">${esc(symbolName(sym))}<span class="sv"> · ${esc(sourceLabel(d))}</span></span></div>
     <div class="c src" title="${esc(sourceLabel(d))}">${esc(sourceLabel(d))}</div>
     <div class="c q"><span class="px">${fmtPrice(priceFor(sym, tf), sym.dp)}</span><span class="chg ${chg > 0 ? 'up' : chg < 0 ? 'down' : ''}">${fmtChg(chg)}</span></div>
+    <div class="c lf">${llftCell(llftFor(sym, tf), tf, sym)}</div>
     ${GROUPS.map(g => `<div class="c g" data-g="${g.id}">${groupCell(g, g.id === 'mc' ? macroGroup(sym, r) : r?.groups[g.id])}</div>`).join('')}
     <div class="c tot">${totalCell(r)}</div>
   </div>`;
@@ -383,6 +446,7 @@ function rowHtml(sym) {
 function headHtml() {
   return `<div class="thead" role="row">
     <div class="c symh">${t('col.symbol')}</div><div class="c srch">${t('col.source')}</div><div class="c qh">${t('col.price')}</div>
+    <div class="c lf" title="${esc(t('col.llftTitle'))}">${t('col.llft')}</div>
     ${GROUPS.map(g => `<div class="c g" data-g="${g.id}" title="${esc(t(g.votes ? 'col.votes' : 'col.context'))}"><span class="l">${esc(groupName(g))}</span><span class="s">${esc(groupShort(g))}</span></div>`).join('')}
     <div class="c tot">${t('col.total')}</div>
   </div>`;
@@ -472,6 +536,66 @@ function historyText(sym) {
   return weeks >= 104 ? t('d.years', { n: (weeks / 52).toFixed(1) }) : t('d.weeks', { n: Math.round(weeks) });
 }
 
+// Lai Long Follow Trend comes first and stands apart from the groups: it does not vote in Total.
+const LF_ROWS = ['trend', 'htf', 'regime', 'brk', 'sig', 'sup', 'res', 'vwap'];
+
+function llftZoneCell(z, close, dp) {
+  if (!z) return lfDash;
+  const title = t('lf.t.zone', { name: zoneName(z, lang()), bot: fmtPrice(z.bot, dp), top: fmtPrice(z.top, dp), score: Math.round(z.score), tests: z.tests })
+    + (z.flipped ? ` · ${t('lf.flipped')}` : '');
+  const d = zoneDistance(z, close);
+  return `<span class="v ${d === 0 ? 'A' : 'N'}" title="${esc(title)}">${d === 0 ? esc(t('lf.inside')) : fmtPct(d)}</span>`;
+}
+
+function llftRowCell(id, r, tf, sym) {
+  if (!r) return '<span class="v X">…</span>';
+  if (r.na) return lfDash;
+  const L = r.last, T = lfText(), dp = sym.dp;
+  if (!L) return lfDash;
+  const tone = d => (d > 0 ? 'B' : d < 0 ? 'S' : 'N');
+  switch (id) {
+    case 'trend': return `<span class="v ${tone(L.trend)}" title="${esc(T.trend[L.trend])}">${ARROW[L.trend]}</span>`;
+    case 'htf':
+      if (!isNum(L.regimeHtf)) return `<span class="v X" title="${esc(t('lf.t.noHtf'))}">–</span>`;
+      return `<span class="v ${tone(L.htfTrend)}" title="${esc(T.trend[L.htfTrend])}">${LLFT_HTF[tf] ?? 'MN'} ${ARROW[L.htfTrend]}</span>`;
+    case 'regime': {
+      const code = regimeLabel(L.regime);
+      return `<span class="v ${code === 'trend' ? 'A' : code === 'balance' ? 'W' : 'N'}" title="${esc(T.regime[code])}">${Math.round(L.regime)}</span>`;
+    }
+    case 'brk':
+      if (!L.breakout) return lfDash;
+      return `<span class="v A" title="${esc(T.stage[L.breakout.stage])}">${esc(t(`lf.${L.breakout.stage}`))} ${ARROW[L.breakout.dir]}</span>`;
+    case 'sig': {
+      const sg = L.signal;
+      if (!sg) return lfDash;
+      const fresh = followState(r).code === 'signal';
+      return `<span class="v ${fresh ? tone(sg.dir) : 'N'}" title="${esc(llftSignalText(sg, dp))}">${sg.type} ${ARROW[sg.dir]} · ${sg.grade}</span>`;
+    }
+    case 'sup': return llftZoneCell(L.support, L.close, dp);
+    case 'res': return llftZoneCell(L.resistance, L.close, dp);
+    case 'vwap': {
+      if (!isNum(L.vwapOrigin) || !(L.vwapOrigin > 0)) return lfDash;
+      const d = ((L.close - L.vwapOrigin) / L.vwapOrigin) * 100;
+      const title = t('lf.t.vwap', { v: fmtPrice(L.vwapOrigin, dp), h: isNum(L.vwapOriginHtf) ? fmtPrice(L.vwapOriginHtf, dp) : '–' });
+      return `<span class="v ${tone(d)}" title="${esc(title)}">${fmtPct(d)}</span>`;
+    }
+  }
+  return lfDash;
+}
+
+function llftSection(sym, tfs) {
+  const lf = tfs.map(tf => llftFor(sym, tf));
+  let html = `<div class="gh">Lai Long Follow Trend <span class="tag">${esc(t('lf.indep'))}</span></div>`
+    + lf.map((r, i) => `<div class="cell">${llftCell(r, tfs[i], sym, true)}</div>`).join('');
+  for (const id of LF_ROWS) {
+    const open = state.info === `lf.${id}`;
+    html += `<button class="nm" type="button" data-info="lf.${id}" aria-expanded="${open}">${esc(t(`lf.r.${id}`))}</button>`
+      + lf.map((r, i) => `<div class="cell">${llftRowCell(id, r, tfs[i], sym)}</div>`).join('');
+    if (open) html += `<div class="note"><p>${esc(t(`lf.n.${id}`))}</p>${id === 'trend' ? `<p>${esc(t('l.lf.rules'))}</p>` : ''}</div>`;
+  }
+  return html;
+}
+
 function renderDetail() {
   const el = $('#detail'), sym = SYMBOL_BY_ID[state.open];
   if (!sym) return;
@@ -482,6 +606,7 @@ function renderDetail() {
   const span = tfs.length > 1 ? ` style="grid-column:span ${tfs.length}"` : '';
   const opts = sym.sources.map(x => `<option value="${esc(sourceKey(x))}"${sourceKey(x) === sourceKey(d) ? ' selected' : ''}${usable(x) ? '' : ' disabled'}>${esc(sourceLabel(x))} (${esc(t(`kind.${x.kind}`))})${usable(x) ? '' : ` · ${esc(t('kind.needsKey'))}`}</option>`).join('');
   let mx = `<div class="mx" style="--n:${tfs.length}"><div></div>${tfs.map(tf => `<div class="h">${tf}</div>`).join('')}`;
+  mx += llftSection(sym, tfs);
   mx += `<div class="gh">${t('col.total')}</div>${results.map(r => `<div class="cell">${totalCell(r)}</div>`).join('')}`;
   for (const g of GROUPS) {
     // Macro does not depend on the timeframe: one cell across all columns.
@@ -659,6 +784,7 @@ function bindSettings() {
 
 function reloadAfterSourceChange() {
   state.evals.clear();
+  state.llft.clear();
   loadAll(settings.tf);
   pollPrices();
   pollTrades();
@@ -701,6 +827,15 @@ function renderLegend() {
         ${v('W', t('st.Squeeze'), t('l.warn'))}
         ${v('N', '58 ↑', t('l.value'))}
       </div>
+      <h3>${t('l.llft')}</h3>
+      <div class="lg">
+        ${v('B', `A ${ARROW[1]} · A`, t('l.lf.signal'))}
+        ${v('A', `${t('lf.wait')} ${ARROW[1]}`, t('l.lf.brk'))}
+        ${v('B', `${t('lf.with')} ${ARROW[1]}`, t('l.lf.with'))}
+        ${v('N', `${t('lf.against')} ${ARROW[-1]}`, t('l.lf.against'))}
+        ${v('W', lfText().regime.balance, t('l.lf.balance'))}
+      </div>
+      <p>${esc(t('l.lf.rules'))}</p>
       <h3>${t('l.columns')}</h3>
       <div class="lg">
         ${GROUPS.map(g => `<div><b style="font-weight:600;min-width:46px">${esc(groupShort(g))}</b><span>${esc(groupName(g))}: ${INDICATORS.filter(d => d.group === g.id).map(d => esc(indText(d, 'name'))).join(', ')}.${g.votes ? '' : ` ${t('l.noVote')}`}</span></div>`).join('')}
